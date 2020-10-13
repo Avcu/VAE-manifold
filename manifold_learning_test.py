@@ -49,13 +49,13 @@ manifold_train.plot_manifold()
 options = {}
 options['dim_latent'] = 1 # dimension of latent variabels
 options['activation_type'] = 'relu' # activation function in the layers 'tanh' or None or 'relu' or 'elu'
-options['learning_rate'] = 1e-3 # what is learning rate (usually 0.001 to 0.01)
+options['learning_rate'] = 1e-2 # what is learning rate (usually 0.001 to 0.01)
 options['num_epochs'] = 400 # number of epochs
 options['batch_size'] = 400 # number of batches in trainig
 options['iteration_plot_show'] = 1000 # when to plot the results
 options['print_info_step'] = 50 # how many steps to show info
 options['sw_plot'] = 1 # switch for plotting the results within trials
-options['plot_mode'] = 'show' #'save' or 'show'
+options['plot_mode'] = 'save' #'save' or 'show'
 options['optimizer_type'] = 'Adam' # 'Adam' or 'GD'
 options['make_latent_cycle'] = 1
 options['train_restore'] = 'train' # 'train' or 'resotre'

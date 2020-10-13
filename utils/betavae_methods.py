@@ -59,7 +59,7 @@ class bvae_model(object):
 
     def create_directory(self):
         # self.save_folder_name = options['save_folder_name'] # file name to save the results  
-        string_info = ''
+        string_info = '_10_12_2020'
         if self.manifold_train:
             string_info = string_info + '_{}'.format(self.manifold_train.manifold_type)
 
@@ -99,11 +99,14 @@ class bvae_model(object):
         mu = tf.layers.dense(net,self.dim_latent, kernel_initializer = initilizer_dense)
         # we need to design mu more intelligently, mu sometimes does get loop coordinates, therefore we should take that into account
         # therefore we force all latent variabales to be around 
+        '''
         mu_0 = tf.expand_dims( tf.acos(mu[:,0]) , 1)
         mu_1 = tf.expand_dims( mu[:,1] , 1)
-
+        
         mu = tf.concat( [mu_0,mu_1] , axis = 1 )
-
+        '''
+        if self.make_latent_cycle == 1:
+            mu = 2 * np.pi * tf.math.sigmoid(mu) - np.pi
         # sigma2  = tf.layers.dense(net,self.dim_latent, kernel_initializer = initilizer_dense)
         # sigma2 = tf.math.square(sigma2)
         # log_sigma2 = tf.math.log(sigma2+1e-8)
@@ -126,11 +129,13 @@ class bvae_model(object):
             # net = tf.concat([net,net_cos,net_sin],axis=-1)
             
             # for test
-            net_0 = tf.expand_dims( tf.cos(net[:,0]) , 1)
-            net_1 = tf.expand_dims( net[:,1] , 1)
+            
+            net_0 = tf.cos(net)
+            net_1 = tf.sin(net)
             net = tf.concat( [net_0,net_1] , axis = 1 )
-
-
+            '''
+            net = tf.math.sin(net)
+            '''
         net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
     
