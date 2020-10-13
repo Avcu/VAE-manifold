@@ -7,6 +7,7 @@ import os
 from scipy import stats, io
 import tensorflow as tf
 from tensorflow.contrib import rnn
+from numpy import linalg as LA
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 # methods for RNN
 
@@ -63,6 +64,8 @@ class bvae_model(object):
             string_info = string_info + '_{}'.format(self.manifold_train.manifold_type)
 
         string_info = string_info + '_dimlat{}'.format(self.dim_latent)
+        if self.manifold_train.noise_value != 0:
+            string_info = string_info + '_noise{:.1f}'.format(self.manifold_train.noise_value)
 
         if self.make_latent_cycle == 1:
             string_cycle = '_cycle'
@@ -84,19 +87,22 @@ class bvae_model(object):
 
         net = recog_input
 
-        net = tf.layers.dense(net,10, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
-        net = tf.layers.dense(net,10, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
-        net = tf.layers.dense(net,10, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
         mu = tf.layers.dense(net,self.dim_latent, kernel_initializer = initilizer_dense)
         # we need to design mu more intelligently, mu sometimes does get loop coordinates, therefore we should take that into account
         # therefore we force all latent variabales to be around 
-        
+        mu_0 = tf.expand_dims( tf.acos(mu[:,0]) , 1)
+        mu_1 = tf.expand_dims( mu[:,1] , 1)
+
+        mu = tf.concat( [mu_0,mu_1] , axis = 1 )
 
         # sigma2  = tf.layers.dense(net,self.dim_latent, kernel_initializer = initilizer_dense)
         # sigma2 = tf.math.square(sigma2)
@@ -115,18 +121,23 @@ class bvae_model(object):
         net = latent_sample
         if self.make_latent_cycle == 1: # since manifolds inherently are obtained from loops and lines, here we help the network by injecting
             # our human knowledge into network -> the generative network learns to use either the loop (cos and sin) or the line
-            net_cos = tf.math.cos(net)
-            net_sin = tf.math.sin(net)
-            #net = net_cos
-            net = tf.concat([net,net_cos,net_sin],axis=-1)
+            # net_cos = tf.math.cos(net)
+            # net_sin = tf.math.sin(net)
+            # net = tf.concat([net,net_cos,net_sin],axis=-1)
+            
+            # for test
+            net_0 = tf.expand_dims( tf.cos(net[:,0]) , 1)
+            net_1 = tf.expand_dims( net[:,1] , 1)
+            net = tf.concat( [net_0,net_1] , axis = 1 )
 
-        net = tf.layers.dense(net,10, kernel_initializer = initilizer_dense)
+
+        net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
     
-        net = tf.layers.dense(net,10, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
-        net = tf.layers.dense(net,10, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,20, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
         net = tf.layers.dense(net,self.dim_data, kernel_initializer = initilizer_dense)
@@ -291,13 +302,17 @@ class bvae_model(object):
                 ax.set_ylabel('dim 2')
                 ax.set_zlabel('dim 3')
                 ax.set_title('true data points on manifold')
-
+                if self.manifold_train and self.manifold_train.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
                 ax = fig.add_subplot(232,projection='3d')
                 ax.scatter3D(x_recons[:,0],x_recons[:,1],x_recons[:,2],s=100,marker='x',color=colors,linewidth = 3)
                 ax.set_xlabel('dim 1')
                 ax.set_ylabel('dim 2')
                 ax.set_zlabel('dim 3')
                 ax.set_title('learned data points on manifold')
+                if self.manifold_train and self.manifold_train.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
+
             elif self.dim_data == 2:
                 ax = fig.add_subplot(231)
                 ax.scatter(x_true[:,0],x_true[:,1],s=100,marker='x',color=colors,linewidth = 3)
@@ -409,62 +424,100 @@ class bvae_model(object):
             
         pass
 
-    def plot_test(self,batch_x):
+    def plot_test(self,batch_x,manifold):
         # plot_folder: path to save the plot
         # plot_name: name of the save plot
-        # plot_mode: 'save' or 'show'
-                
-        x_recons, z_mu, x_true = self.sess.run([self.x_recons,self.latent_mu,self.x],feed_dict = {self.x: batch_x, self.is_training: True})
-        
+        # plot_mode: 'save' or 'show'       
+        x_recons, z_mu, z_log_sigma2, x_true = self.sess.run([self.x_recons,self.latent_mu,self.latent_log_sigma2,self.x],feed_dict = {self.x: batch_x, self.is_training: True})
+
+        # just to check the values
+        z_sigma2 = np.exp(z_log_sigma2)
+
+        marker_size = 120 
+        if manifold:
+            colors = manifold.points_colors
+        else:
+            colors = cm.rainbow( np.linspace(0, 1, np.shape(batch_x)[0] ) )
+        manifold_time = range(np.shape(batch_x)[0])
+        colors_latent = colors[manifold_time,:]        
+
         fig = plt.figure(figsize=[12,9])
         if self.dim_data > 2:
             ax = fig.add_subplot(231,projection='3d')
-            ax.scatter3D(x_true[:,0],x_true[:,1],x_true[:,2],s=200,marker='x',color='g',linewidth = 3)
+            ax.scatter3D(x_true[manifold_time,0],x_true[manifold_time,1],x_true[manifold_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('dim 1')
             ax.set_ylabel('dim 2')
             ax.set_zlabel('dim 3')
             ax.set_title('true data points on manifold')
-
+            if manifold and manifold.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
             ax = fig.add_subplot(232,projection='3d')
-            ax.scatter3D(x_recons[:,0],x_recons[:,1],x_recons[:,2],s=200,marker='x',color='g',linewidth = 3)
+            ax.scatter3D(x_recons[manifold_time,0],x_recons[manifold_time,1],x_recons[manifold_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('dim 1')
             ax.set_ylabel('dim 2')
             ax.set_zlabel('dim 3')
             ax.set_title('learned data points on manifold')
+            if manifold and manifold.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
         elif self.dim_data == 2:
             ax = fig.add_subplot(231)
-            ax.scatter(x_true[:,0],x_true[:,1],s=200,marker='x',color='g',linewidth = 3)
+            ax.scatter(x_true[manifold_time,0],x_true[manifold_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('dim 1')
             ax.set_ylabel('dim 2')
             ax.set_title('true data points on manifold')
 
             ax = fig.add_subplot(232)
-            ax.scatter(x_recons[:,0],x_recons[:,1],s=200,marker='x',color='g',linewidth = 3)
+            ax.scatter(x_recons[manifold_time,0],x_recons[manifold_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('dim 1')
             ax.set_ylabel('dim 2')
 
             ax.set_title('learned data points on manifold')
 
+        latent_time = range(np.shape(batch_x)[0])
+        colors_latent = colors[latent_time,:]
         if self.dim_latent == 1:
             ax = fig.add_subplot(234)
-            ax.scatter(range(np.shape(z_mu)[0]),z_mu[:,0])
+            ax.scatter(latent_time,z_mu[latent_time,0],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('point')
             ax.set_title('latent 1')
 
+            ax = fig.add_subplot(235)
+            ax.scatter(np.cos(z_mu[latent_time,0]),np.sin(z_mu[latent_time,0]),s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('cos(latent1)')
+            ax.set_xlabel('sin(latent1)')
+            ax.set_title('latent 1 in cos and sin')
 
-        if self.dim_latent > 1:
+        if self.dim_latent == 2:
+            # remove this later (just to test)
+            ax = fig.add_subplot(233)
+            ax.scatter(x_true[latent_time,2] , LA.norm(z_mu[latent_time,:], axis = 1) , s = marker_size , marker='x' , color=colors_latent , linewidth = 3)
+            ax.set_xlabel('z dim (manifold)')
+            ax.set_ylabel('r (latent)')
+            ax.set_title('latent 1&2')
             ax = fig.add_subplot(234)
-            ax.scatter(z_mu[:,0],z_mu[:,1])
+            ax.scatter(z_mu[latent_time,0],z_mu[latent_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('point')
             ax.set_title('latent 1&2')
-
-        if self.dim_latent > 2:
             ax = fig.add_subplot(235)
-            ax.scatter(z_mu[:,0],z_mu[:,2])
+            ax.scatter(latent_time,z_mu[latent_time,0],s=200,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1')
+            ax = fig.add_subplot(236)
+            ax.scatter(latent_time,z_mu[latent_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 2')
+
+        if self.dim_latent == 3:
+            ax = fig.add_subplot(234)
+            ax.scatter(z_mu[latent_time,0],z_mu[latent_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1&2')
+            ax = fig.add_subplot(235)
+            ax.scatter(z_mu[latent_time,0],z_mu[latent_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('point')
             ax.set_title('latent 1&3')
             ax = fig.add_subplot(236)
-            ax.scatter(z_mu[:,1],z_mu[:,2])
+            ax.scatter(z_mu[latent_time,1],z_mu[latent_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
             ax.set_xlabel('point')
             ax.set_title('latent 2&3')
         

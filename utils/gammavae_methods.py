@@ -1,12 +1,14 @@
-#
+# this vae methods is designed to learn the low-dimensional manifold of high dimensional data
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import sys
 import os
 from scipy import stats, io
 import tensorflow as tf
 from tensorflow.contrib import rnn
 os.environ['CUDA_VISIBLE_DEVICES'] = '0'
+from numpy import linalg as LA
 # methods for RNN
 
 class gvae_model(object):
@@ -22,6 +24,7 @@ class gvae_model(object):
         #self.num_iterations_per_epoch = options['num_iterations_per_epoch'] # number of iterations per epoch
         self.num_epochs = options['num_epochs'] # number of epochs
         self.batch_size = options['batch_size'] # number of batches in trainig
+        self.make_latent_cycle = options['make_latent_cycle'] # to make the latent cycle
         self.print_info_step = options['print_info_step'] # how many steps to show info
         self.sw_plot = options['sw_plot'] # switch for plotting the results within trials
         self.plot_mode = options['plot_mode'] # 'show' to show the plot or 'save' to only save the plot
@@ -29,67 +32,72 @@ class gvae_model(object):
         self.train_restore = options['train_restore'] # whether we learn or restore (maybe delete later)
         self.iteration_plot_show = options['iteration_plot_show']
         self.dropout_rate = options['dropout_rate']
-
+        self.save_global_directory = options['save_global_directory']
+        self.manifold_train = options['manifold_train'] # manifold object used in creating data
+        self.manifold_test = options['manifold_test'] # manifold object used in creating data
+        self.gen_linear = options['gen_linear'] # whether the decoder is linear
         # create train and test dataset
-        self.x_train = data_set.train_images
+        self.dim_data = data_set.dim_x
+        self.x_train = data_set.x_train
         self.x_train_num_samples = np.shape(self.x_train)[0]
 
-        self.x_test_recons = data_set.test_reconstruct
-        self.x_test_recons_num_samples = np.shape(self.x_test_recons)[0]
+        self.x_test = data_set.x_test
+        self.x_test_num_samples = np.shape(self.x_test)[0]
 
-        self.x_test_interp = data_set.test_interpolate
-        self.x_test_interp_num_samples = np.shape(self.x_test_interp)[0]
         
         #set additional parameters
         self.num_iterations_per_epoch = np.int(np.floor(self.x_train_num_samples/self.batch_size))
+        # beta is a scalar or is beta schedule - > in each case create beta schedule
         self.gamma = gamma
         self.capacity_schedule = capacity_schedule
         # self.save_directory = options['save_directory'] # directory to save the results
-        # self.save_folder_name = options['save_folder_name'] # file name to save the results   
-        self.save_main_folder = 'gamma_vae/trained_model_gamma{:.1f}_cschedule_{}to{}'.format(self.gamma, int( np.min(self.capacity_schedule) ), int( np.max(self.capacity_schedule) ) ) 
+        self.create_directory()
+
+    def create_directory(self):
+        # self.save_folder_name = options['save_folder_name'] # file name to save the results 
+        if 'save_main_folder' in self.options:
+            self.save_main_folder = self.options['save_main_folder']
+        else:     
+            string_info = ''
+            if self.manifold_train:
+                string_info = string_info + '_{}'.format(self.manifold_train.manifold_type)
+
+            string_info = string_info + '_dimlat{}'.format(self.dim_latent)
+            if self.manifold_train.noise_value != 0:
+                string_info = string_info + '_noise{:.1f}'.format(self.manifold_train.noise_value)
+            if self.gen_linear == 1:
+                string_info = string_info +'_genlinear'
+
+            if self.make_latent_cycle == 1:
+                string_cycle = '_cycle'
+            else:
+                string_cycle = ''
+            self.save_main_folder = '{}/gamma_vae{}/trained_model_gamma{:.2f}_cschedule_{:.2f}to{:.2f}{}'.format(self.save_global_directory, string_cycle, self.gamma, np.min(self.capacity_schedule) ,  np.max(self.capacity_schedule) , string_info )     
+
+        return    
+
     def recognition_network(self,recog_input):
         # we want to build this recognition network:
-        # 64x64x1
-        # 32x32x32
-        # 16x16x32
-        # 8x8x32
-        # 4x4x32
-        # 256
-        # 256
-        # 10(mu) and 10(log_sigma2)
+        # these are the hidden layers -> input-10-10-10-mu,sigma
         
-        initilizer_conv = tf.random_normal_initializer(0,0.03)
         initilizer_dense = tf.contrib.layers.xavier_initializer(uniform=False)
 
 
         net = recog_input
-        net = tf.expand_dims(net,axis=3)
-        # conv nets
-        net = tf.keras.layers.Conv2D(32,(4,4), strides = (2,2), padding = 'same', kernel_initializer = initilizer_conv) (net) #32x32x32
-        net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
 
-        net = tf.keras.layers.Conv2D(32,(4,4), strides = (2,2), padding = 'same', kernel_initializer = initilizer_conv) (net)#16x16x32
-        net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
-
-        net = tf.keras.layers.Conv2D(32,(4,4), strides = (2,2), padding = 'same', kernel_initializer = initilizer_conv) (net)#8x8x32
-        net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
-
-        net = tf.keras.layers.Conv2D(32,(4,4), strides = (2,2), padding = 'same', kernel_initializer = initilizer_conv) (net)#4x4x32
-        net = tf.nn.relu(net)
-        # dense layer
-        net = tf.reshape(net, [-1, 4*4*32])
-
-        net = tf.layers.dense(net,256, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,40, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
-        net = tf.layers.dense(net,256, kernel_initializer = initilizer_dense)
+        net = tf.layers.dense(net,40, kernel_initializer = initilizer_dense)
+        net = tf.nn.relu(net)
+
+        net = tf.layers.dense(net,40, kernel_initializer = initilizer_dense)
         net = tf.nn.relu(net)
 
         mu = tf.layers.dense(net,self.dim_latent, kernel_initializer = initilizer_dense)
-
+        # we need to design mu more intelligently, mu sometimes does get loop coordinates, therefore we should take that into account
+        # therefore we force all latent variabales to be around 
+        
 
         # sigma2  = tf.layers.dense(net,self.dim_latent, kernel_initializer = initilizer_dense)
         # sigma2 = tf.math.square(sigma2)
@@ -101,62 +109,43 @@ class gvae_model(object):
 
     def generative_network(self,latent_sample):
         # we want to build this recognition network:
-        # 10
-        # 256
-        # 256
-        # 4x4x32
-        # 8x8x32
-        # 16x16x32
-        # 32x32x32
-        # 64x64x1
+        # sample-10-10-10-x_recons
         
-        initilizer_dconv = tf.random_normal_initializer(0,0.03)
         initilizer_dense = tf.contrib.layers.xavier_initializer(uniform=False)
+        activation_fn = lambda x: tf.nn.relu(x)
+        if self.gen_linear == 1:
+            activation_fn = lambda x: x
+        
         
         net = latent_sample
+        if self.make_latent_cycle == 1: # since manifolds inherently are obtained from loops and lines, here we help the network by injecting
+            # our human knowledge into network -> the generative network learns to use either the loop (cos and sin) or the line
+            net_cos = tf.math.cos(net)
+            net_sin = tf.math.sin(net)
+            #net = net_cos
+            net = tf.concat([net,net_cos,net_sin],axis=-1)
 
-        net = tf.layers.dense(net,256, kernel_initializer = initilizer_dense)
-        net = tf.nn.relu(net)
-
-        net = tf.layers.dense(net,256, kernel_initializer = initilizer_dense)
-        net = tf.nn.relu(net)
+        net = tf.layers.dense(net,40, kernel_initializer = initilizer_dense)
+        net = activation_fn(net)
     
-        net = tf.layers.dense(net,512, kernel_initializer = initilizer_dense)
-        net = tf.nn.relu(net)
+        net = tf.layers.dense(net,40, kernel_initializer = initilizer_dense)
+        net = activation_fn(net)
 
-        net = tf.reshape(net, [-1, 4, 4, 32])
+        net = tf.layers.dense(net,40, kernel_initializer = initilizer_dense)
+        net = activation_fn(net)
 
-        net = tf.keras.layers.Conv2DTranspose(32,kernel_size = 2, strides = 2, padding = 'valid', output_padding = 0, kernel_initializer = initilizer_dconv)(net) #8x8x32
-        net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
+        net = tf.layers.dense(net,self.dim_data, kernel_initializer = initilizer_dense)
+        x_reconstruct = net
 
-        net = tf.keras.layers.Conv2DTranspose(32,kernel_size = 2, strides = 2, padding = 'valid', output_padding = 0, kernel_initializer = initilizer_dconv)(net) #16x16x32
-        net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
-
-        net = tf.keras.layers.Conv2DTranspose(32,kernel_size = 2, strides = 2, padding = 'valid', output_padding = 0, kernel_initializer = initilizer_dconv)(net) #32x32x32
-        net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
-
-        net = tf.keras.layers.Conv2DTranspose(1,kernel_size = 2, strides = 2, padding = 'valid', output_padding = 0, kernel_initializer = initilizer_dconv)(net) #64x64x1
-        #net = tf.nn.relu(net)
-        #net = tf.layers.dropout(net,rate = self.dropout_rate , training= self.is_training )
-
-
-        x_reconstruct_logit = tf.squeeze(net,axis=3)
-        
-
-        return x_reconstruct_logit
+        return x_reconstruct
 
     def build_computation_graph(self):
         self.sess = tf.Session()
-        which_initlizer = tf.contrib.layers.xavier_initializer(uniform=False) # or None
         # define auto encoder architecture
-        self.x = tf.placeholder(tf.float32 , shape=[None,64,64] ) # num_batches, smaples in each batch, target_dim
+        self.x = tf.placeholder(tf.float32 , shape=[None,self.dim_data] ) # num_batches, smaples in each batch, target_dim
         self.lr = tf.placeholder(tf.float32 , shape=[] )
         self.is_training = tf.placeholder(tf.bool, [])
-        self.c = tf.placeholder(tf.float32,[])
-
+        self.c = tf.placeholder(tf.float32, [])
         self.latent_mu, self.latent_log_sigma2 = self.recognition_network(self.x)
 
         eps = tf.random_normal(tf.shape(self.latent_log_sigma2), dtype=tf.float32, mean=0., stddev=1.0,
@@ -164,8 +153,7 @@ class gvae_model(object):
                        
         self.latent_sample = self.latent_mu + tf.exp(self.latent_log_sigma2/2) * eps
 
-        self.x_recons_logit = self.generative_network(self.latent_sample)
-        self.x_recons = tf.nn.sigmoid(self.x_recons_logit)
+        self.x_recons = self.generative_network(self.latent_sample)
 
         # define loss function
         self.loss_train = self.compute_loss()
@@ -178,7 +166,6 @@ class gvae_model(object):
             self.optimizer_train = tf.train.GradientDescentOptimizer(learning_rate=self.learning_rate)   
 
         # define operation of training
-        self.operation_train_early = self.optimizer_train.minimize(self.recons_loss)
         self.operation_train = self.optimizer_train.minimize(self.loss_train)
 
         # initlize the training variables values
@@ -193,18 +180,16 @@ class gvae_model(object):
 
     def compute_loss(self):
         # Reconstruction loss
-        recons_loss = tf.nn.sigmoid_cross_entropy_with_logits(labels=self.x,
-                                                                logits=self.x_recons_logit)
-        recons_loss = tf.reduce_sum(recons_loss, 1)
+        recons_loss = tf.math.square(self.x - self.x_recons)
+        recons_loss = tf.reduce_sum(recons_loss,axis=1)
         self.recons_loss = tf.reduce_mean(recons_loss)
-
         # Latent loss
         latent_loss = -0.5 * tf.reduce_sum(1 + self.latent_log_sigma2
                                         - tf.square(self.latent_mu)
                                         - tf.exp(self.latent_log_sigma2), 1)
         self.latent_loss = tf.reduce_mean(latent_loss)        
         # Loss with encoding capacity term
-        return self.recons_loss + self.gamma * tf.abs(self.latent_loss-self.c)
+        return self.recons_loss + self.gamma * tf.abs(self.latent_loss - self.c)
 
     def log_gaussian(self,x, mu, log_sigma2):
         const_log_pdf = (- 0.5 * np.log(2 * np.pi)).astype('float32') 
@@ -228,50 +213,46 @@ class gvae_model(object):
             # initilize
             self.sess.run(self.init)
             for epoch in range(1,self.num_epochs+1):
-                c_this = self.capacity_schedule[epoch-1]
+                # create the correct beta
+                c_this = self.capacity_schedule[epoch-1] # assign the correct beta to the schedule
+                #
                 shuffle_index = np.random.randint(self.x_train_num_samples, size=(self.x_train_num_samples))
         
                 for iteration in range(1,self.num_iterations_per_epoch+1):
                     batch_index = shuffle_index[ 
                         range( (iteration-1)*self.batch_size , (iteration)*self.batch_size) ]
                     # create the batches of input and target TODO: make it batch based
-                    batch_x = self.x_train[batch_index,:,:]
+                    batch_x = self.x_train[batch_index,:]
                     # run gradient descent
-                    if epoch < 10:
-                        self.sess.run(self.operation_train_early, feed_dict = { self.x: batch_x,
-                        self.c: c_this, self.is_training: True} )
-                    if epoch >= 10:
-                        self.sess.run(self.operation_train, feed_dict = { self.x: batch_x,
-                        self.c: c_this, self.is_training: True} )   
+                    self.sess.run(self.operation_train, feed_dict = { self.x: batch_x, self.is_training: True, self.c: c_this} ) 
                     # plot
                     if self.sw_plot == 1:
                         plot_folder = '{}/plots'.format(self.save_main_folder)
                         plot_name = 'epoch_{}_train.png'.format(epoch)
-                        self.plot_train(iteration, self.iteration_plot_show, 5, batch_x, self.plot_mode, plot_folder, plot_name)                   
+                        self.plot_train(iteration, self.iteration_plot_show, 5, batch_x, self.plot_mode, plot_folder, plot_name, self.manifold_train)                   
                     # display training results
-                    if iteration % self.print_info_step == 0:
-                        loss_this, recons_loss_this, latent_loss_this= self.sess.run([self.loss_train,self.recons_loss,self.latent_loss], feed_dict = {self.x: batch_x, self.c: c_this, self.is_training: True})
+                    if iteration % self.print_info_step == 0 or iteration == self.num_iterations_per_epoch:
+                        loss_this, recons_loss_this, latent_loss_this= self.sess.run([self.loss_train,self.recons_loss,self.latent_loss], feed_dict = {self.x: batch_x, self.is_training: True, self.c: c_this})
                         # print info                        
-                        print('epoch {}, iteration {} --> loss_tot = {}, loss_rec = {}, loss_lat = {}'.format(epoch,iteration,loss_this, recons_loss_this, latent_loss_this))    
+                        print('TRAIN: epoch {}, iteration {} --> loss_tot = {}, loss_rec = {}, loss_lat = {}'.format(epoch,iteration,loss_this, recons_loss_this, latent_loss_this))    
                         # append loss
                         self.loss_tot_train.append(loss_this)
                         self.loss_recons_train.append(recons_loss_this)
                         self.loss_latent_train.append(latent_loss_this)
                 
                 # create the batches of input and target TODO: make it batch based
-                batch_x_test = self.x_test_recons[:,:,:]
+                batch_x_test = self.x_test[:,:]
                 # run gradient descent
-                loss_this, recons_loss_this, latent_loss_this = self.sess.run([self.loss_train,self.recons_loss,self.latent_loss], feed_dict = {self.x: batch_x_test,
-                self.c:c_this, self.is_training: False})
+                loss_this, recons_loss_this, latent_loss_this = self.sess.run([self.loss_train,self.recons_loss,self.latent_loss], feed_dict = {self.x: batch_x_test, self.is_training: False, self.c: c_this})
                 print('TEST: epoch {}--> loss_tot = {}, loss_rec = {}, loss_lat = {}'.format(epoch,loss_this, recons_loss_this, latent_loss_this))
                 self.loss_tot_test.append(loss_this)
                 self.loss_recons_test.append(recons_loss_this)
                 self.loss_latent_test.append(latent_loss_this)
-                print( 'loss_test so far: {}'.format(self.loss_tot_test) )
+                #print( 'loss_test so far: {}'.format(self.loss_tot_test) )
                 if self.sw_plot == 1:
                         plot_folder = '{}/plots'.format(self.save_main_folder)
                         plot_name = 'epoch_{}_test.png'.format(epoch)
-                        self.plot_train(1, 1, 8, batch_x_test, self.plot_mode, plot_folder, plot_name) 
+                        self.plot_train(1, 1, 8, batch_x_test, self.plot_mode, plot_folder, plot_name,self.manifold_test) 
                 # save the model
                 self.save_model(epoch)
                 
@@ -294,47 +275,84 @@ class gvae_model(object):
         self.build_computation_graph()
         self.saver.restore(self.sess,model_path)
 
-    def plot_train(self,iteration,iteration_plot,num_images,batch_x,plot_mode,plot_folder,plot_name):
+    def plot_train(self, iteration, iteration_plot, num_images, batch_x, plot_mode, plot_folder, plot_name, manifold):
         # plot_folder: path to save the plot
         # plot_name: name of the save plot
         # plot_mode: 'save' or 'show'
 
         if  iteration % iteration_plot == 0:
             # plot prediction
-                
-                x_recons, z_sample, x_true = self.sess.run([self.x_recons,self.latent_sample,self.x],feed_dict = {self.x: batch_x, self.is_training: True})
-                
-                x_recons_binary = x_recons >= 0.5
-                fig = plt.figure(figsize=[12,9])
-                for img in range(num_images):
-                    # ax = fig.add_subplot(100*num_images + 10*3 + 3*img + 1)
-                    # ax.imshow(np.squeeze(x_true[img,:,:]) )
-                    # ax.set_title('ground truth(0)')
-                    # ax = fig.add_subplot(100*num_images + 10*3 + 3*img + 2)
-                    # ax.imshow(np.squeeze(x_recons[img,:,:]))
-                    # ax.set_title('sigmoid 0')
-                    # ax = fig.add_subplot(100*num_images + 10*3 + 3*img + 3)
-                    # ax.imshow(np.squeeze(x_recons_binary[img,:,:]) )
-                    # ax.set_title('reconstruction 0')
-                    ax = plt.subplot2grid((num_images,3),(img,0))
-                    ax.imshow(np.squeeze(x_true[img,:,:]) )
-                    ax.set_title('ground truth(0)')
-                    ax = plt.subplot2grid((num_images,3),(img,1))
-                    ax.imshow(np.squeeze(x_recons[img,:,:]))
-                    ax.set_title('sigmoid 0')
-                    ax = plt.subplot2grid((num_images,3),(img,2))
-                    ax.imshow(np.squeeze(x_recons_binary[img,:,:]) )
-                    ax.set_title('reconstruction 0')
-                if plot_mode is 'show':
-                    plt.pause(0.05)
-                    plt.show() 
-                if plot_mode is 'save': 
-                    if not os.path.exists(plot_folder):
-                        os.makedirs(plot_folder)
-                        print('This directory was created: {}'.format(plot_folder))
+            if manifold:
+                colors = manifold.points_colors
+            else:
+                colors = cm.rainbow( np.linspace(0, 1, np.shape(batch_x)[0] ) )
+            x_recons, z_mu, x_true = self.sess.run([self.x_recons,self.latent_mu,self.x],feed_dict = {self.x: batch_x, self.is_training: True})
+            
+            fig = plt.figure(figsize=[12,9])
+            if self.dim_data > 2:
+                ax = fig.add_subplot(231,projection='3d')
+                ax.scatter3D(x_true[:,0],x_true[:,1],x_true[:,2],s=100,marker='x',color=colors,linewidth = 3)
+                ax.set_xlabel('dim 1')
+                ax.set_ylabel('dim 2')
+                ax.set_zlabel('dim 3')
+                ax.set_title('true data points on manifold')
+                if self.manifold_train and self.manifold_train.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
+                ax = fig.add_subplot(232,projection='3d')
+                ax.scatter3D(x_recons[:,0],x_recons[:,1],x_recons[:,2],s=100,marker='x',color=colors,linewidth = 3)
+                ax.set_xlabel('dim 1')
+                ax.set_ylabel('dim 2')
+                ax.set_zlabel('dim 3')
+                ax.set_title('learned data points on manifold')
+                if self.manifold_train and self.manifold_train.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
 
-                    plt.savefig('{}/{}'.format(plot_folder,plot_name))
+            elif self.dim_data == 2:
+                ax = fig.add_subplot(231)
+                ax.scatter(x_true[:,0],x_true[:,1],s=100,marker='x',color=colors,linewidth = 3)
+                ax.set_xlabel('dim 1')
+                ax.set_ylabel('dim 2')
+                ax.set_title('true data points on manifold')
 
+                ax = fig.add_subplot(232)
+                ax.scatter(x_recons[:,0],x_recons[:,1],s=100,marker='x',color=colors,linewidth = 3)
+                ax.set_xlabel('dim 1')
+                ax.set_ylabel('dim 2')
+                ax.set_title('learned data points on manifold')   
+
+            ax = fig.add_subplot(234)
+            ax.plot(range( np.shape(z_mu)[0] ),z_mu[:,0])
+            ax.set_xlabel('point')
+            ax.set_title('latent 1')
+
+            if self.dim_latent == 1:
+                ax = fig.add_subplot(235)
+                ax.scatter(np.cos(z_mu),np.sin(z_mu),color=colors)
+                ax.set_xlabel('point')
+                ax.set_title('latent sin and cosine')
+
+            if self.dim_latent > 1:
+                ax = fig.add_subplot(235)
+                ax.plot(range( np.shape(z_mu)[0] ),z_mu[:,1])
+                ax.set_xlabel('point')
+                ax.set_title('latent 2')
+
+            if self.dim_latent > 2:
+                ax = fig.add_subplot(236)
+                ax.plot(range( np.shape(z_mu)[0] ),z_mu[:,2])
+                ax.set_xlabel('point')
+                ax.set_title('latent 3')
+            
+            if plot_mode is 'show':
+                plt.pause(0.05)
+                plt.show() 
+            if plot_mode is 'save': 
+                if not os.path.exists(plot_folder):
+                    os.makedirs(plot_folder)
+                    print('This directory was created: {}'.format(plot_folder))
+
+                plt.savefig('{}/{}'.format(plot_folder,plot_name))
+                plt.close('all')
             
             
         pass
@@ -399,3 +417,144 @@ class gvae_model(object):
             
             
         pass
+
+    def plot_test(self,batch_x,manifold):
+        # plot_folder: path to save the plot
+        # plot_name: name of the save plot
+        # plot_mode: 'save' or 'show'       
+        x_recons, z_mu, z_log_sigma2, x_true = self.sess.run([self.x_recons,self.latent_mu,self.latent_log_sigma2,self.x],feed_dict = {self.x: batch_x, self.is_training: True})
+
+        # just to check the values
+        z_sigma2 = np.exp(z_log_sigma2)
+
+        marker_size = 120 
+        if manifold:
+            colors = manifold.points_colors
+        else:
+            colors = cm.rainbow( np.linspace(0, 1, np.shape(batch_x)[0] ) )
+        manifold_time = range(np.shape(batch_x)[0])
+        colors_latent = colors[manifold_time,:]        
+
+        fig = plt.figure(figsize=[12,9])
+        if self.dim_data > 2:
+            ax = fig.add_subplot(231,projection='3d')
+            ax.scatter3D(x_true[manifold_time,0],x_true[manifold_time,1],x_true[manifold_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('dim 1')
+            ax.set_ylabel('dim 2')
+            ax.set_zlabel('dim 3')
+            ax.set_title('true data points on manifold')
+            if manifold and manifold.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
+            ax = fig.add_subplot(232,projection='3d')
+            ax.scatter3D(x_recons[manifold_time,0],x_recons[manifold_time,1],x_recons[manifold_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('dim 1')
+            ax.set_ylabel('dim 2')
+            ax.set_zlabel('dim 3')
+            ax.set_title('learned data points on manifold')
+            if manifold and manifold.manifold_type == 'torus':
+                    ax.view_init(elev=64., azim=100.)
+        elif self.dim_data == 2:
+            ax = fig.add_subplot(231)
+            ax.scatter(x_true[manifold_time,0],x_true[manifold_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('dim 1')
+            ax.set_ylabel('dim 2')
+            ax.set_title('true data points on manifold')
+
+            ax = fig.add_subplot(232)
+            ax.scatter(x_recons[manifold_time,0],x_recons[manifold_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('dim 1')
+            ax.set_ylabel('dim 2')
+
+            ax.set_title('learned data points on manifold')
+
+        latent_time = range(np.shape(batch_x)[0])
+        colors_latent = colors[latent_time,:]
+        if self.dim_latent == 1:
+            ax = fig.add_subplot(234)
+            ax.scatter(latent_time,z_mu[latent_time,0],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1')
+
+            ax = fig.add_subplot(235)
+            ax.scatter(np.cos(z_mu[latent_time,0]),np.sin(z_mu[latent_time,0]),s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('cos(latent1)')
+            ax.set_xlabel('sin(latent1)')
+            ax.set_title('latent 1 in cos and sin')
+
+        if self.dim_latent == 2:
+            # remove this later (just to test)
+            if np.shape(x_true)[1]>2:
+                ax = fig.add_subplot(233)
+                ax.scatter(x_true[latent_time,2] , LA.norm(z_mu[latent_time,:], axis = 1) , s = marker_size , marker='x' , color=colors_latent , linewidth = 3)
+                ax.set_xlabel('z dim (manifold)')
+                ax.set_ylabel('r (latent)')
+                ax.set_title('latent 1&2')
+            ax = fig.add_subplot(234)
+            ax.scatter(z_mu[latent_time,0],z_mu[latent_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1&2')
+            ax = fig.add_subplot(235)
+            ax.scatter(latent_time,z_mu[latent_time,0],s=200,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1')
+            ax = fig.add_subplot(236)
+            ax.scatter(latent_time,z_mu[latent_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 2')
+
+        if self.dim_latent == 3:
+            ax = fig.add_subplot(234)
+            ax.scatter(z_mu[latent_time,0],z_mu[latent_time,1],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1&2')
+            ax = fig.add_subplot(235)
+            ax.scatter(z_mu[latent_time,0],z_mu[latent_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 1&3')
+            ax = fig.add_subplot(236)
+            ax.scatter(z_mu[latent_time,1],z_mu[latent_time,2],s = marker_size,marker='x',color=colors_latent,linewidth = 3)
+            ax.set_xlabel('point')
+            ax.set_title('latent 2&3')
+        
+
+        plt.pause(0.05)
+        plt.show() 
+
+
+            
+            
+        pass
+
+
+    def save_datapoints_manifold(self):
+        # this is in order to save the manifold points and its corresponding latent factors:
+        # 
+        manifold = self.manifold_train
+        batch_x = manifold.points_manifold
+        x_recons, z_mu, z_log_sigma2 = self.sess.run([self.x_recons,self.latent_mu,self.latent_log_sigma2],feed_dict = {self.x: batch_x, self.is_training: True})
+
+        # get the variables we want
+        file_folder = "{}/saved_files".format(self.save_main_folder)
+        if not os.path.exists(file_folder):
+            os.makedirs(file_folder)
+            print('This directory was created: {}'.format(file_folder))            
+        file_path = "{}/datapoints".format(file_folder)
+
+
+
+        savedict = {}
+        savedict['x'] = batch_x
+        savedict['z_mu'] = z_mu
+        savedict['x_recons'] = x_recons
+        savedict['z_log_sigma2'] = z_log_sigma2 
+        savedict['options'] = self.options  
+        savedict['points_colors']  = manifold.points_colors
+        savedict['generated_manifold_options'] = manifold.options        
+        # for matfile save
+        if not os.path.isfile(file_path):
+            io.savemat('{}.mat'.format(file_path) , savedict )
+        else:
+            print('this file already exists: {}'.format(file_path))
+        #for numpy save
+        #np.savez(file_path_train,**train_vals)
+        print('saving is done')
